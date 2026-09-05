@@ -277,10 +277,9 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
                             )
                         raw = external[name]
                         if callable(raw):
-                            try:
-                                raw = raw(float(t), *aa)
-                            except TypeError:
-                                raw = raw(float(t), pmap)
+                            raw = _call_derivative(
+                                raw, t, dict(zip(names, aa)), aa
+                            )
                         arr = np.asarray(raw)
                         if arr.shape == (n, n):
                             dm[name] = dm[name] + arr
