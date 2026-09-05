@@ -825,7 +825,7 @@ def _tangent(H, psi0, t, params, controls, derivatives, tangents, t0=0.0):
         # column zero.
         propagated, _, _ = _forward(
             H, dpsi, t, params, controls, derivatives=derivatives, t0=t0,
-            require_derivatives=False,
+            require_derivatives=False, sensitivity_names=(),
         )
         out = out + propagated
     for k, v in dparams.items():
