@@ -12,11 +12,25 @@ carry an `alias_of` field and an explicit status, so every exported name has a
 decision even when it shares one rule with its canonical callable.
 
 The sidecar uses `chainrules==0.1.0` when present and bundles a small compatible
-fallback for isolated/offline installs; both expose the same `jvp`, `vjp`,
-`grad` and `value_and_grad` protocol through explicit registration at `import
-quspin_ad`.  QuSpin remains the sole source of every primal value.  No source
-under `upstream/` is imported or modified by the wheel, and no finite-difference
-calculation is used at runtime.
+fallback for isolated/offline installs.  The fallback exposes `jvp`, `vjp`,
+`grad`, `value_and_grad`, `nested_jvp`/`jvp2`, and `value_grad_and_hvp` through
+explicit registration at `import quspin_ad`.  QuSpin remains the sole source of
+every ordinary primal value.  No source under `upstream/` is imported or
+modified by the wheel, and no finite-difference calculation is used at runtime.
+
+## Second-order composition
+
+`nested_jvp(function, *args, tangents=..., second_tangents=...)` returns
+`(value, tangent, second_tangent)` for compositions built from the seven
+implemented smooth wrappers and supported NumPy operations.  Omitting
+`second_tangents` describes a straight-line input path.  For a real scalar
+loss, `value_grad_and_hvp(loss, *args, wrt=..., vector=...)` returns
+`(value, gradient, Hessian @ vector)`; the compact positional spelling
+`value_grad_and_hvp(loss, x, vector)` infers the sole active argument.
+`hvp(...)` returns only the product and `value_and_hvp(...)` returns the value
+and product.  These interfaces use analytic forward-over-reverse local rules,
+including mixed terms for bilinear primitives and the real-linear convention
+for complex inputs.  They never evaluate perturbed primal points.
 
 ## Implemented interfaces
 

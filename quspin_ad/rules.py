@@ -21,6 +21,20 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in clean offline ven
     from . import _chainrules as ad
 
 
+def _is_jet(value: object) -> bool:
+    """Whether ``value`` is the bundled composability tracer."""
+    jet_type = getattr(ad, "_Jet", ())
+    return bool(jet_type) and isinstance(value, jet_type)
+
+
+def _has_jet(*values: object) -> bool:
+    return any(_is_jet(value) for value in values)
+
+
+def _zero_like(value: object) -> object:
+    return np.zeros_like(value.value if _is_jet(value) else np.asarray(value))
+
+
 def _native(path: str) -> Callable[..., Any]:
     """Resolve an upstream callable lazily.
 
@@ -72,6 +86,18 @@ def _input_gradient(value: np.ndarray, gradient: np.ndarray) -> np.ndarray:
 
 def KL_div(p1: object, p2: object) -> Any:
     """Call :func:`quspin.tools.misc.KL_div` (primal only)."""
+    if _has_jet(p1, p2):
+        p1_value = np.asarray(p1.value if _is_jet(p1) else p1)
+        p2_value = np.asarray(p2.value if _is_jet(p2) else p2)
+        if p1_value.ndim != 1 or p2_value.ndim != 1 or p1_value.shape != p2_value.shape:
+            raise TypeError("KL_div AD requires same-shaped one-dimensional distributions")
+        if np.any(p1_value <= 0.0) or np.any(p2_value <= 0.0):
+            raise TypeError("KL_div AD requires strictly positive distributions")
+        if abs(np.sum(p1_value) - 1.0) > 1e-13 or abs(np.sum(p2_value) - 1.0) > 1e-13:
+            raise ValueError("KL_div AD requires normalized distributions")
+        # This is algebraically identical to QuSpin's implementation and is
+        # deliberately written with composable NumPy operations for HVPs.
+        return np.sum(p1 * (np.log(p1) - np.log(p2)))
     return _native("quspin.tools.misc.KL_div")(p1, p2)
 
 
@@ -79,6 +105,15 @@ def KL_div(p1: object, p2: object) -> Any:
 def _kl_jvp(
     tangents: Mapping[str, object], p1: object, p2: object
 ) -> tuple[Any, object]:
+    if _has_jet(p1, p2):
+        value = KL_div(p1, p2)
+        dp1, dp2 = _active(tangents, "p1"), _active(tangents, "p2")
+        if dp1 is ad.ZERO:
+            dp1 = _zero_like(p1)
+        if dp2 is ad.ZERO:
+            dp2 = _zero_like(p2)
+        tangent = (np.log(p1 / p2) + 1.0) * dp1 - (p1 / p2) * dp2
+        return value, tangent
     value = KL_div(p1, p2)
     _unsupported(KL_div, tangents, ("p1", "p2"))
     dp1 = _active(tangents, "p1")
@@ -123,6 +158,20 @@ def _kl_vjp(
 
 def coherent_state(a: object, n: int, dtype: object = np.float64) -> Any:
     """Call :func:`quspin.basis.coherent_state` (primal only)."""
+    if _is_jet(a):
+        if np.asarray(a.value).ndim != 0:
+            raise TypeError("coherent_state AD currently requires scalar a")
+        if np.asarray(a.value) == 0 or not np.all(np.isfinite(np.asarray(a.value))):
+            raise ad.NonDifferentiablePoint(
+                "coherent_state has no stable rule at a=0 or non-finite amplitude"
+            )
+        k = np.arange(int(n))
+        # exp(-|a|²/2) a**k / sqrt(k!) is the exact upstream construction.
+        factorial = np.cumprod(np.arange(1, int(n) + 1, dtype=float))
+        factorial = np.concatenate(([1.0], factorial[:-1])) if int(n) else np.array([], dtype=float)
+        state = (np.exp(-0.5 * (np.abs(a) ** 2)) * (a ** k)) / np.sqrt(factorial)
+        target_dtype = np.result_type(np.asarray(a.value).dtype, dtype)
+        return state.astype(target_dtype)
     return _native("quspin.basis.coherent_state")(a, n, dtype=dtype)
 
 
@@ -148,6 +197,13 @@ def _coherent_linearization(value: np.ndarray, a: object, da: object) -> np.ndar
 def _coherent_jvp(
     tangents: Mapping[str, object], a: object, n: int, dtype: object = np.float64
 ) -> tuple[Any, object]:
+    if _is_jet(a):
+        value = coherent_state(a, n, dtype=dtype)
+        da = _active(tangents, "a")
+        if da is ad.ZERO:
+            da = 0.0
+        k = np.arange(np.asarray(value.value).size)
+        return value, value * (k * da / a - np.real(np.conj(a) * da))
     value = coherent_state(a, n, dtype=dtype)
     _unsupported(coherent_state, tangents, ("a",))
     da = _active(tangents, "a")
@@ -190,11 +246,23 @@ def _coherent_vjp(
 
 def commutator(H1: object, H2: object) -> Any:
     """Call :func:`quspin.operators.commutator` (primal only)."""
+    if _has_jet(H1, H2):
+        a = np.asarray(H1.value if _is_jet(H1) else H1)
+        b = np.asarray(H2.value if _is_jet(H2) else H2)
+        if a.ndim != 2 or b.ndim != 2 or a.shape != b.shape or a.shape[0] != a.shape[1]:
+            raise TypeError("commutator AD requires equally shaped square dense matrices")
+        return H1 @ H2 - H2 @ H1
     return _native("quspin.operators.commutator")(H1, H2)
 
 
 def anti_commutator(H1: object, H2: object) -> Any:
     """Call :func:`quspin.operators.anti_commutator` (primal only)."""
+    if _has_jet(H1, H2):
+        a = np.asarray(H1.value if _is_jet(H1) else H1)
+        b = np.asarray(H2.value if _is_jet(H2) else H2)
+        if a.ndim != 2 or b.ndim != 2 or a.shape != b.shape or a.shape[0] != a.shape[1]:
+            raise TypeError("anti_commutator AD requires equally shaped square dense matrices")
+        return H1 @ H2 + H2 @ H1
     return _native("quspin.operators.anti_commutator")(H1, H2)
 
 
@@ -212,6 +280,16 @@ def _binary_jvp(
     H2: object,
     plus: bool,
 ) -> tuple[Any, object]:
+    if _has_jet(H1, H2):
+        value = fn(H1, H2)
+        d1, d2 = _active(tangents, "H1"), _active(tangents, "H2")
+        terms = []
+        if d1 is not ad.ZERO:
+            terms.append(d1 @ H2 + (H2 @ d1 if plus else -(H2 @ d1)))
+        if d2 is not ad.ZERO:
+            terms.append(H1 @ d2 + (d2 @ H1 if plus else -(d2 @ H1)))
+        tangent = terms[0] if len(terms) == 1 else terms[0] + terms[1] if terms else np.zeros_like(value)
+        return value, tangent
     value = fn(H1, H2)
     _unsupported(fn, tangents, ("H1", "H2"))
     d1 = _active(tangents, "H1")
@@ -299,6 +377,24 @@ def ED_state_vs_time(
     psi: object, E: object, V: object, times: object, iterate: bool = False
 ) -> Any:
     """Call QuSpin's exact-diagonalization time evolution routine."""
+    if _has_jet(psi, E, times):
+        if iterate:
+            raise ad.NonDifferentiablePoint("ED_state_vs_time AD requires iterate=False")
+        p_value = np.asarray(psi.value if _is_jet(psi) else psi)
+        e_value = np.asarray(E.value if _is_jet(E) else E)
+        v_value = np.asarray(V.value if _is_jet(V) else V)
+        t_value = np.asarray(times.value if _is_jet(times) else times)
+        if (p_value.ndim != 1 or e_value.ndim != 1 or t_value.ndim != 1
+                or p_value.size != e_value.size or v_value.shape != (e_value.size, e_value.size)):
+            raise TypeError("ED_state_vs_time AD requires 1-D psi, E, times and square V")
+        if np.iscomplexobj(e_value) or np.iscomplexobj(t_value):
+            raise TypeError("ED_state_vs_time AD requires real E and times")
+        # Keep the same phase/eigenvector orientation as QuSpin's pure-state
+        # implementation while expressing the smooth path in composable
+        # NumPy operations.
+        phase = np.exp(-1j * times[:, None] * E[None, :])
+        coeff = V.conj().T @ psi
+        return V @ (phase * coeff[None, :]).T
     return _native("quspin.tools.evolution.ED_state_vs_time")(
         psi, E, V, times, iterate=iterate
     )
@@ -336,6 +432,22 @@ def _ed_jvp(
     times: object,
     iterate: bool = False,
 ) -> tuple[Any, object]:
+    if _has_jet(psi, E, times):
+        if iterate:
+            raise ad.NonDifferentiablePoint("ED_state_vs_time AD requires iterate=False")
+        value = ED_state_vs_time(psi, E, V, times, iterate=False)
+        dpsi, dE, dt = _active(tangents, "psi"), _active(tangents, "E"), _active(tangents, "times")
+        if dpsi is ad.ZERO:
+            dpsi = _zero_like(psi)
+        if dE is ad.ZERO:
+            dE = _zero_like(E)
+        if dt is ad.ZERO:
+            dt = _zero_like(times)
+        phase = np.exp(-1j * times[:, None] * E[None, :])
+        coeff = V.conj().T @ psi
+        dphase = phase * (-1j * (dt[:, None] * E[None, :] + times[:, None] * dE[None, :]))
+        dc = V.conj().T @ dpsi
+        return value, V @ (dphase * coeff[None, :] + phase * dc[None, :]).T
     if iterate:
         raise ad.NonDifferentiablePoint("ED_state_vs_time AD requires iterate=False")
     value, phase, coeff, mat, t = _ed_forward(psi, E, V, times)
@@ -413,11 +525,31 @@ def _ed_vjp(
 
 def lin_comb_Q_T(coeff: object, Q_T: object, out: object = None) -> Any:
     """Call :func:`quspin.tools.lanczos.lin_comb_Q_T` (primal only)."""
+    if _has_jet(coeff, Q_T):
+        if out is not None:
+            raise ad.NonDifferentiablePoint("lin_comb_Q_T AD requires out=None")
+        c_value = np.asarray(coeff.value if _is_jet(coeff) else coeff)
+        q_value = np.asarray(Q_T.value if _is_jet(Q_T) else Q_T)
+        if c_value.ndim != 1 or q_value.ndim != 2 or q_value.shape[0] != c_value.size:
+            raise TypeError("lin_comb_Q_T AD requires coeff shape (m,) and Q_T shape (m,n)")
+        return coeff @ Q_T
     return _native("quspin.tools.lanczos.lin_comb_Q_T")(coeff, Q_T, out=out)
 
 
 def project_op(Obs: object, proj: object, dtype: object = np.complex128) -> Any:
     """Call QuSpin's observable projection routine (primal only)."""
+    if _has_jet(Obs, proj):
+        obs_shape = np.asarray(Obs.value if _is_jet(Obs) else Obs).shape
+        proj_shape = np.asarray(proj.value if _is_jet(proj) else proj).shape
+        if len(obs_shape) != 2 or obs_shape[0] != obs_shape[1] or len(proj_shape) != 2:
+            raise TypeError("project_op AD requires dense square observables and rank-2 projectors")
+        if proj_shape[0] == obs_shape[0]:
+            result = proj.conj().T @ Obs @ proj
+        elif proj_shape[1] == obs_shape[0]:
+            result = proj @ Obs @ proj.conj().T
+        else:
+            raise ValueError("project_op observable/projector dimensions are incompatible")
+        return {"Proj_Obs": result}
     return _native("quspin.tools.misc.project_op")(Obs, proj, dtype=dtype)
 
 
@@ -439,6 +571,22 @@ def _projection_inputs(
 def _projection_jvp(
     tangents: Mapping[str, object], Obs: object, proj: object, dtype: object
 ) -> tuple[Any, object]:
+    if _has_jet(Obs, proj):
+        value = project_op(Obs, proj, dtype=dtype)
+        d_obs, d_proj = _active(tangents, "Obs"), _active(tangents, "proj")
+        if d_obs is ad.ZERO:
+            d_obs = _zero_like(Obs)
+        if d_proj is ad.ZERO:
+            d_proj = _zero_like(proj)
+        obs_shape = np.asarray(Obs.value if _is_jet(Obs) else Obs).shape
+        proj_shape = np.asarray(proj.value if _is_jet(proj) else proj).shape
+        if len(obs_shape) != 2 or obs_shape[0] != obs_shape[1] or len(proj_shape) != 2:
+            raise TypeError("project_op AD requires dense square observables and rank-2 projectors")
+        if proj_shape[0] == obs_shape[0]:
+            derivative = d_proj.conj().T @ Obs @ proj + proj.conj().T @ d_obs @ proj + proj.conj().T @ Obs @ d_proj
+        else:
+            derivative = d_proj @ Obs @ proj.conj().T + proj @ d_obs @ proj.conj().T + proj @ Obs @ d_proj.conj().T
+        return value, {"Proj_Obs": derivative}
     value = project_op(Obs, proj, dtype=dtype)
     _unsupported(project_op, tangents, ("Obs", "proj"))
     observable, projector, down = _projection_inputs(Obs, proj)
@@ -530,6 +678,16 @@ def _project_vjp(
 def _lincomb_jvp(
     tangents: Mapping[str, object], coeff: object, Q_T: object, out: object = None
 ) -> tuple[Any, object]:
+    if _has_jet(coeff, Q_T):
+        if out is not None:
+            raise ad.NonDifferentiablePoint("lin_comb_Q_T AD requires out=None")
+        value = lin_comb_Q_T(coeff, Q_T, out=out)
+        dc, dq = _active(tangents, "coeff"), _active(tangents, "Q_T")
+        if dc is ad.ZERO:
+            dc = _zero_like(coeff)
+        if dq is ad.ZERO:
+            dq = _zero_like(Q_T)
+        return value, dc @ Q_T + coeff @ dq
     if out is not None:
         raise ad.NonDifferentiablePoint("lin_comb_Q_T AD requires out=None")
     value = lin_comb_Q_T(coeff, Q_T, out=out)
@@ -604,6 +762,8 @@ def register_upstream_rules() -> tuple[str, ...]:
             native = _native(path)
             if native is wrapper:
                 continue
+            if hasattr(ad.rules, "alias"):
+                ad.rules.alias(native, wrapper)
             # Obtain the private rule functions by callable identity.  This is
             # preferable to maintaining a second, divergent implementation.
             dispatch = {
