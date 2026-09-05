@@ -472,12 +472,20 @@ def _jet_sum(x, axis=None, dtype=None, out=None, keepdims=False, initial=None, w
         raise NonDifferentiablePoint("sum(out=...) and masked sum are unsupported for traced values")
     xv, xt, xs, xj = _jet_parts(x)
     value = np.sum(xv, axis=axis, dtype=dtype, keepdims=keepdims, initial=initial)
-    tangent = np.sum(xt, axis=axis, keepdims=keepdims, initial=initial if initial is not None else None)
-    second = np.sum(xs, axis=axis, keepdims=keepdims, initial=initial if initial is not None else None)
+    tangent = np.sum(xt, axis=axis, keepdims=keepdims)
+    second = np.sum(xs, axis=axis, keepdims=keepdims)
     if xj is None:
         return value
     def pb(c):
-        return (np.broadcast_to(c, xv.shape),)
+        expanded = np.asarray(c)
+        if axis is not None and not keepdims:
+            axes = (axis,) if isinstance(axis, (int, np.integer)) else tuple(axis)
+            normalized = tuple(a if a >= 0 else xv.ndim + a for a in axes)
+            target = list(expanded.shape)
+            for a in sorted(normalized):
+                target.insert(a, 1)
+            expanded = expanded.reshape(target)
+        return (np.broadcast_to(expanded, xv.shape),)
     def pbd(c):
         return (np.zeros_like(xv, dtype=np.result_type(c, xv)),)
     return _Jet(value, tangent, second, parents=(xj,), pullback=pb, pullback_dot=pbd)
