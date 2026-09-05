@@ -437,7 +437,10 @@ def _jet_conj(x):
         return (np.conj(c),)
 
     def pbd(c):
-        return (np.conj(c),)
+        # Conjugation is a fixed real-linear map.  Its adjoint is therefore
+        # constant along the traced direction; treating it as varying adds a
+        # spurious term to reverse-over-forward HVPs.
+        return (np.zeros_like(c),)
 
     return _Jet(np.conj(xv), np.conj(xt), np.conj(xs), parents=(xj,), pullback=pb, pullback_dot=pbd)
 
@@ -715,11 +718,11 @@ def jvp(function, /, *args, tangents, second_tangents=None, **kwargs):
         raise TypeError("tangents must be a mapping from parameter names to values")
     signature = _signature_bind(function, args, kwargs)
     _names(tuple(tangents), signature, "tangent")
-    if not tangents or all(value is ZERO for value in tangents.values()):
-        return function(*args, **kwargs), ZERO
     try:
         result = rules.get_jvp(function)(dict(tangents), *args, **kwargs)
     except RuleNotFound:
+        if not tangents or all(value is ZERO for value in tangents.values()):
+            return function(*args, **kwargs), ZERO
         # A composable Python loss may itself call ``jvp`` on registered
         # primitives.  Trace that loss on the bundled jet so nested JVPs do
         # not require a separate rule for every lambda/closure.

@@ -204,6 +204,13 @@ def _coherent_jvp(
             da = 0.0
         k = np.arange(np.asarray(value.value).size)
         return value, value * (k * da / a - np.real(np.conj(a) * da))
+    aa = np.asarray(a)
+    if aa.ndim != 0:
+        raise TypeError("coherent_state AD currently requires scalar a")
+    if aa == 0 or not np.all(np.isfinite(aa)):
+        raise ad.NonDifferentiablePoint(
+            "coherent_state has no stable rule at a=0 or non-finite amplitude"
+        )
     value = coherent_state(a, n, dtype=dtype)
     _unsupported(coherent_state, tangents, ("a",))
     da = _active(tangents, "a")
