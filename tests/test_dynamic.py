@@ -169,6 +169,16 @@ def test_dynamic_plain_matrix_derivative_contract_and_boundaries():
             params={"amplitude": 0.3},
             derivatives=matrix_derivatives,
         )
+    with pytest.raises(ad.NonDifferentiablePoint, match="derivative metadata"):
+        ad.jvp(
+            quspin_ad.dynamic_trajectory,
+            matrix_drive,
+            psi0,
+            times,
+            params={"amplitude": 0.3},
+            derivatives={"other": np.sin(0.0) * sx},
+            tangents={"params": {"amplitude": 1.0}},
+        )
 
 
 def test_dynamic_callback_without_derivative_contract_fails_only_for_sensitivity():

@@ -314,6 +314,7 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
     if derivatives is not None:
         rawd = _call_derivative(derivatives, t, pmap, ppos) if callable(derivatives) else derivatives
         if isinstance(rawd, Mapping):
+            active_names = tuple(pmap) if sensitivity_names is None else tuple(sensitivity_names)
             for name, val in rawd.items():
                 if sensitivity_names is not None and name not in sensitivity_names:
                     continue
@@ -322,6 +323,12 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
                 if arr.shape != (n, n):
                     raise TypeError("drive derivative matrices must match Hamiltonian shape")
                 dm[name] = arr
+            missing = set(active_names) - set(dm)
+            if missing:
+                raise ad.NonDifferentiablePoint(
+                    "dynamic_trajectory requires derivative metadata for drive "
+                    f"parameter(s) {sorted(missing)!r}"
+                )
         else:
             arr = np.asarray(rawd)
             if arr.ndim == 2:
