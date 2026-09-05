@@ -334,12 +334,14 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
                 arr = arr[None, ...]
             if arr.ndim != 3 or arr.shape[1:] != (n, n):
                 raise TypeError("drive derivatives must have shape (nparam,n,n)")
-            names = tuple(pmap) or tuple(str(i) for i in range(arr.shape[0]))
+            full_names = tuple(pmap) or tuple(str(i) for i in range(arr.shape[0]))
+            if len(full_names) != arr.shape[0]:
+                raise ValueError("derivative count does not match parameter count")
+            names = full_names
             if sensitivity_names is not None:
                 names = tuple(name for name in names if name in sensitivity_names)
                 # ``arr`` is ordered according to the full parameter list;
                 # select the corresponding rows before zipping below.
-                full_names = tuple(pmap) or tuple(str(i) for i in range(arr.shape[0]))
                 arr = arr[[full_names.index(name) for name in names]] if names else arr[:0]
             if len(names) != arr.shape[0]:
                 raise ValueError("derivative count does not match parameter count")
