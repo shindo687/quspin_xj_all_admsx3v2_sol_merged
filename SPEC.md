@@ -118,13 +118,17 @@ The registered JVP/VJP active names are `psi0`, `params`, and `controls`.
 `objective` may be supplied for a scalar final-state or time-integrated
 objective when it provides an analytic `jvp(states, tangent)` or
 `derivative(states)` contract (or is itself a registered ChainRules callable).
-Unknown controls, missing derivative metadata, non-monotone grids, mixed states,
-and iterator/adaptive solver paths raise explicit errors. With
-`checkpoint_interval=k`, reverse mode retains only every `k`-th output state,
-recomputes each segment, and integrates one continuous adjoint backwards;
-trajectory storage is therefore `O(Ns * ceil(Ntime/k))` checkpoints (plus the
-caller cotangent and returned value), rather than one sensitivity trajectory per
-control. The same callback derivative contract is used on both reverse paths.
+Unknown controls, missing derivative metadata, discontinuous callback schedules,
+non-monotone grids, mixed states, and iterator/adaptive solver paths raise
+explicit errors. With `checkpoint_interval=k`, the reverse sweep retains only
+every `k`-th output state as its checkpoint workspace, recomputes each segment,
+and integrates one continuous adjoint backwards; this removes the per-control
+sensitivity trajectories and bounds the additional reverse workspace to
+`O(Ns * ceil(Ntime/k))`. The VJP closure still retains the returned full
+trajectory (`O(Ns * Ntime)`) so it can validate cotangent shape and pull back a
+general scalar objective, including time-integrated objectives; dense segment
+recomputation is part of the checkpoint tradeoff. The same callback derivative
+contract is used on both reverse paths.
 Cotangents use the real inner product: gradients for real-valued controls are
 real scalars, while complex-valued controls retain their complex real-linear
 cotangent (the conjugate of the complex-linear pairing).

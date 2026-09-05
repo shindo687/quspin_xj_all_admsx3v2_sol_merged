@@ -42,11 +42,12 @@ Hamiltonian callbacks must expose `derivative` (one coefficient) or
 `derivatives` (a mapping for the differentiated coefficients); plain matrix
 callables accept the equivalent `derivatives` mapping. `chainrules.jvp` and
 `chainrules.vjp` support `psi0`, `params`, and `controls`, with
-`checkpoint_interval` providing a bounded-memory reverse sweep. An optional
+`checkpoint_interval` providing bounded checkpoint workspace; the VJP closure
+still retains the returned trajectory for general objective pullbacks. An optional
 scalar `objective` must provide an analytic `jvp`/`derivative` contract (or
 already be a registered ChainRules callable). Missing metadata, non-monotone
-grids, mixed states, and iterator or adaptive paths fail explicitly; no
-finite-difference fallback is used. Real-valued controls return real
+grids, discontinuous schedules, mixed states, and iterator or adaptive paths
+fail explicitly; no finite-difference fallback is used. Real-valued controls return real
 cotangents, while complex-valued controls preserve their complex real-linear
 cotangents.
 

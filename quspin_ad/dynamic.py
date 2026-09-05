@@ -346,11 +346,88 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
             if len(names) != arr.shape[0]:
                 raise ValueError("derivative count does not match parameter count")
             dm = dict(zip(names, arr))
-    elif pmap:
+    elif pmap and (sensitivity_names is None or sensitivity_names):
         raise ad.NonDifferentiablePoint(
             "dynamic_trajectory requires derivative metadata for drive parameters"
         )
     return Ht, dm
+
+
+def _validate_schedule_continuity(H, t, pmap, ppos, t0=0.0):
+    """Reject callback schedules with an observable jump on the fixed grid.
+
+    The trajectory tangent equations assume a continuous time-dependent
+    Hamiltonian.  A callback can therefore provide perfectly valid parameter
+    derivative metadata and still be outside the differentiable domain when
+    it contains a step.  We perform a small one-sided regularity check at grid
+    points and numeric schedule thresholds present in the callback code.  An
+    explicit ``continuous=False`` marker is also honoured.  This is a domain
+    check only; it is never used to form a derivative.
+    """
+    grid = np.asarray(t, dtype=float)
+    if grid.size == 0:
+        return
+    entries = _quspin_entries(H)
+    callbacks = []
+    if entries is not None:
+        for cb, fn, names, args, _ in entries:
+            callbacks.append((cb, fn, tuple(pmap.get(name, value)
+                                            for name, value in zip(names, args))))
+    elif callable(H):
+        callbacks.append((H, H, None))
+    else:
+        return
+
+    lo = float(t0)
+    hi = float(grid[-1])
+    if hi <= lo:
+        return
+    points = set(float(x) for x in grid[1:-1] if lo < float(x) < hi)
+    points.update(
+        float((a + b) / 2.0)
+        for a, b in zip(grid[:-1], grid[1:])
+        if float(b) > float(a) and lo < (float(a) + float(b)) / 2.0 < hi
+    )
+    # Piecewise schedules commonly compare t with a literal threshold.  Add
+    # such thresholds so a jump is caught even when it is not an output time.
+    for _, fn, _ in callbacks:
+        code = getattr(fn, "__code__", None)
+        if code is not None:
+            for constant in code.co_consts:
+                if isinstance(constant, (int, float, np.integer, np.floating)):
+                    value = float(constant)
+                    if np.isfinite(value) and lo < value < hi:
+                        points.add(value)
+    for callback, fn, args in callbacks:
+        if getattr(callback, "continuous", True) is False or getattr(
+            fn, "continuous", True
+        ) is False:
+            raise ad.NonDifferentiablePoint(
+                f"dynamic callback {getattr(fn, '__name__', fn)!r} is marked discontinuous"
+            )
+        for point in sorted(points):
+            scale = max(1.0, abs(point), abs(hi - lo))
+            eps = min(1e-6 * scale, max((point - lo) / 4.0, (hi - point) / 4.0))
+            eps = max(eps, np.finfo(float).eps * scale * 32.0)
+            try:
+                if entries is not None:
+                    left = fn(point - eps, *args)
+                    right = fn(point + eps, *args)
+                else:
+                    left = _call_matrix(fn, point - eps, pmap, ppos)
+                    right = _call_matrix(fn, point + eps, pmap, ppos)
+                left = np.asarray(left)
+                right = np.asarray(right)
+                jump = float(np.linalg.norm((left - right).ravel()))
+                magnitude = max(float(np.linalg.norm(left.ravel())),
+                                float(np.linalg.norm(right.ravel())))
+            except (TypeError, AttributeError, KeyError, IndexError, ValueError):
+                continue
+            if jump > 1e-5 * (1.0 + magnitude):
+                raise ad.NonDifferentiablePoint(
+                    f"dynamic callback {getattr(fn, '__name__', fn)!r} has a "
+                    "discontinuous time schedule"
+                )
 
 
 def _parse_call(args, t0, times):
@@ -469,8 +546,10 @@ def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
     output.  During the reverse sweep each checkpoint pair is recomputed with
     dense output, and a continuous adjoint is integrated backwards over that
     segment.  Output cotangents are injected at their grid times.  Thus the
-    sidecar retains ``O(Ns * n_checkpoint)`` trajectory state, rather than an
-    augmented state for every control and every time sample.
+    The reverse workspace retains ``O(Ns * n_checkpoint)`` checkpoint state,
+    rather than an augmented state for every control and every time sample.
+    The enclosing VJP still owns the returned full trajectory when a general
+    objective or cotangent-shape validation needs it.
     """
     p = np.asarray(psi0)
     if g.shape != (p.size, t.size):
@@ -729,6 +808,7 @@ def _tangent(H, psi0, t, params, controls, derivatives, tangents, t0=0.0):
         if omitted:
             raise TypeError(f"dynamic control tangents were not supplied: {sorted(omitted)!r}")
         active_names = tuple(name for name in active_names if name in supplied_names_hint)
+    _validate_schedule_continuity(H, t, pmap, tuple(pmap.values()), t0)
     if active_names:
         states, sensitivities, pmap = _forward(
             H, psi0, t, params, controls, derivatives, t0,
@@ -744,7 +824,7 @@ def _tangent(H, psi0, t, params, controls, derivatives, tangents, t0=0.0):
         # avoids the common (and incorrect) shortcut of assigning it only at
         # column zero.
         propagated, _, _ = _forward(
-            H, dpsi, t, params, controls, derivatives=None, t0=t0,
+            H, dpsi, t, params, controls, derivatives=derivatives, t0=t0,
             require_derivatives=False,
         )
         out = out + propagated
@@ -793,6 +873,9 @@ def _dynamic_vjp(wrt, hamiltonian, psi0, *args, params=None,
     unknown_requested = set(requested_control_names) - set(pmap_for_names)
     if unknown_requested:
         raise TypeError(f"unknown dynamic controls: {sorted(unknown_requested)!r}")
+    _validate_schedule_continuity(
+        hamiltonian, t, pmap_for_names, tuple(pmap_for_names.values()), t0
+    )
     active_drive_names = tuple(requested_control_names) if any(
         name in wrt for name in ("params", "controls")
     ) else ()
