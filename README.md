@@ -39,6 +39,7 @@ I/O, sparse/operator object methods, and non-array workflows are explicitly
 reported as deferred or not suitable for AD rather than approximated by finite
 differences.
 
+
 For dynamic control, `dynamic_trajectory(H, psi0, times, params=...)` evaluates
 the Schrödinger equation on a caller-provided nondecreasing grid and integrates
 analytic state sensitivities for the named callback coefficients. QuSpin
@@ -54,6 +55,36 @@ grids, discontinuous schedules, mixed states, and iterator or adaptive paths
 fail explicitly; no finite-difference fallback is used. Real-valued controls return real
 cotangents, while complex-valued controls preserve their complex real-linear
 cotangents.
+
+Second-order composition is available through the bundled ChainRules
+protocol:
+
+```python
+import chainrules as ad
+
+# Compact form: the final positional argument is the direction.
+value, gradient, hvp = ad.value_grad_and_hvp(loss, parameters, direction)
+# Explicit form for several active inputs:
+value, gradient, hvp = ad.value_grad_and_hvp(
+    loss, x, y, wrt=("x", "y"), vector={"x": dx, "y": dy}
+)
+
+# Forward-over-forward composition, for array-valued primitives as well.
+value, tangent, second_tangent = ad.nested_jvp(
+    quspin_ad.ED_state_vs_time, psi, energies, eigenvectors, times,
+    tangents={"E": dE},
+)
+```
+
+`value_grad_and_hvp` requires a real scalar loss and returns mappings keyed by
+`wrt`; `hvp` returns only the product.  `nested_jvp` (also available as
+`jvp2`) returns the value, first directional derivative, and second directional
+derivative.  The implementation uses analytic real-linear local rules and a
+small NumPy jet tracer for composition.  It does not evaluate perturbed
+primal points or use finite differences.  Fixed-shape and boundary restrictions
+of the first-order rules remain in force (`iterate=True`, `out=...`, `a=0`,
+and unsupported active inputs continue to fail explicitly).
+
 
 The `upstream/` directory is a byte-for-byte snapshot of the official QuSpin
 repository used for API inventory and tests; it is not imported by the wheel.

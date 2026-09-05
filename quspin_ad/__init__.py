@@ -36,6 +36,14 @@ grad = _ad.grad
 jvp = _ad.jvp
 value_and_grad = _ad.value_and_grad
 vjp = _ad.vjp
+hvp = _ad.hvp
+value_and_hvp = _ad.value_and_hvp
+value_grad_and_hvp = _ad.value_grad_and_hvp
+value_and_grad_and_hvp = _ad.value_and_grad_and_hvp
+value_grad_hvp = _ad.value_grad_hvp
+hessian_vector_product = _ad.hessian_vector_product
+nested_jvp = _ad.nested_jvp
+jvp2 = _ad.jvp2
 
 __all__ = [
     "ZERO",
@@ -45,14 +53,22 @@ __all__ = [
     "coherent_state",
     "commutator",
     "grad",
+    "hvp",
+    "hessian_vector_product",
     "jvp",
+    "jvp2",
     "lin_comb_Q_T",
     "project_op",
     "floquet_eigensystem",
     "floquet_quasienergies",
     "floquet_spectrum",
     "register_upstream_rules",
+    "nested_jvp",
+    "value_and_hvp",
     "value_and_grad",
+    "value_and_grad_and_hvp",
+    "value_grad_and_hvp",
+    "value_grad_hvp",
     "vjp",
     "dynamic_trajectory",
     "fixed_grid_trajectory",
