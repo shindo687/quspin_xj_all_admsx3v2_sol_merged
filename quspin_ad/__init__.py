@@ -18,6 +18,7 @@ from .rules import (
     register_upstream_rules,
 )
 from .rules import ad as _ad
+
 from .dynamic import (
     dynamic_trajectory,
     fixed_grid_trajectory,
@@ -26,6 +27,9 @@ from .dynamic import (
     trajectory_jvp,
     trajectory_vjp,
 )
+
+from .floquet import floquet_eigensystem, floquet_quasienergies, floquet_spectrum
+
 
 ZERO = _ad.ZERO
 grad = _ad.grad
@@ -44,6 +48,9 @@ __all__ = [
     "jvp",
     "lin_comb_Q_T",
     "project_op",
+    "floquet_eigensystem",
+    "floquet_quasienergies",
+    "floquet_spectrum",
     "register_upstream_rules",
     "value_and_grad",
     "vjp",

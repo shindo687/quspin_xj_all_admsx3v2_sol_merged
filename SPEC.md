@@ -99,6 +99,7 @@ returns requested `Obs`/`proj` gradients under the real Frobenius inner product.
 `dtype` and orientation are fixed during differentiation.  Central differences
 and JVP/VJP duality are checked to `2e-6`.
 
+
 ## Fixed-grid dynamic trajectories
 
 `quspin_ad.dynamic_trajectory(hamiltonian, psi0, times, ...)` evaluates a
@@ -133,6 +134,29 @@ Cotangents use the real inner product: gradients for real-valued controls are
 real scalars, while complex-valued controls retain their complex real-linear
 cotangent (the conjugate of the complex-linear pairing).
 
+### `quspin_ad.floquet_eigensystem(UF, T)`
+
+This sidecar adapter differentiates a fixed-dimensional one-period propagator
+that has already been built by QuSpin.  `UF` may be a square dense matrix or a
+QuSpin `Floquet` object exposing `UF` and `T`.  It returns a mapping with
+`EF` (quasienergies), `thetaF` (unit-circle eigenvalues), `VF` (normalised,
+deterministically phase-aligned right eigenvectors), and `PF` (the
+phase-invariant eigenprojectors).  The branch convention is the principal
+eigenphase `angle(theta) in (-pi, pi)` with `EF = -angle(theta)/T`, ordered by
+ascending `EF` as in QuSpin.  Eigenphases on the branch cut and pairwise
+spectral gaps at or below `gap_tol` raise `NonDifferentiablePoint`.
+
+JVP/VJP active inputs are `UF`, `T`, and the fixed-grid controls
+`drive_phase`, `gauge`, and `momentum`.  A bare matrix uses the documented
+diagonal-generator convention (global phase for `drive_phase`, diagonal
+similarity for `gauge`, and a diagonal phase ramp for `momentum`).  A physical
+driven-lattice adapter should instead pass exact
+`control_derivatives={name: dUF_dname}` (or a mapping/callback exposed by the
+source object), so no finite-difference probing is used.  Use `PF` for
+eigenvector observables that must be invariant under arbitrary input
+eigenvector phases.
+
+
 ## Deferred or unsuitable API
 
 The remaining inventory entries are intentionally not registered.  Basis
@@ -141,10 +165,14 @@ operator constructors, predicates, save/load and block construction perform
 object creation or I/O; sparse matvec helpers are backend dispatch; entropy and
 measurement routines contain sorting, rank changes, SVD/eigenvalue branches or
 discrete subsystem choices; `mean_level_spacing` sorts and branches at ties;
+
 The upstream `evolve` entry remains deferred because it exposes adaptive
 solver/iterator choices; use the bounded `dynamic_trajectory` adapter above for
-fixed-grid control gradients. Floquet, Lanczos eigensolvers and exponential
-operators remain deferred.
+fixed-grid control gradients.  The upstream Floquet constructor (exposing
+adaptive solvers/iterators) remains deferred in favour of the fixed-dimensional
+`floquet_eigensystem` adapter above; Lanczos eigensolvers and exponential
+operators remain deferred for the same reason.
+
 Hamiltonian/quantum-operator methods (`dot`, `expt_value`, `matrix_ele`) are
 object-bound and their parameter dictionaries and dynamic drives require an
 explicit adapter contract not present in QuSpin's public API.  These entries

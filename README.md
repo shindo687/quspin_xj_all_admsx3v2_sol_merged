@@ -29,8 +29,12 @@ gradients = pullback(1.0)
 Supported rules and their mathematical domains are specified in [SPEC.md](SPEC.md).
 The package currently covers the continuous, array-valued APIs `KL_div`,
 `coherent_state`, `commutator`, `anti_commutator`, `ED_state_vs_time`,
-`lin_comb_Q_T`, and `project_op` (dense ndarray domain).  Discrete basis
-construction, eigensolvers, entropy routines,
+`lin_comb_Q_T`, and `project_op` (dense ndarray domain), plus a branch-aware
+`floquet_eigensystem` adapter for an already-built one-period propagator.
+Floquet JVP/VJP supports `UF`, `T`, and fixed-grid `drive_phase`, `gauge`, and
+`momentum` controls; exact control derivative matrices can be supplied for a
+driven lattice.  Discrete basis construction, adaptive evolution,
+eigensolvers,
 I/O, sparse/operator object methods, and non-array workflows are explicitly
 reported as deferred or not suitable for AD rather than approximated by finite
 differences.
