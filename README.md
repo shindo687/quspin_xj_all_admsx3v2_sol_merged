@@ -35,5 +35,17 @@ I/O, sparse/operator object methods, and non-array workflows are explicitly
 reported as deferred or not suitable for AD rather than approximated by finite
 differences.
 
+For dynamic control, `dynamic_trajectory(H, psi0, times, params=...)` evaluates
+the Schrödinger equation on a caller-provided nondecreasing grid and integrates
+analytic state sensitivities for the named callback coefficients. QuSpin
+Hamiltonian callbacks must expose `derivative` (one coefficient) or
+`derivatives` (a mapping for every coefficient); plain matrix callables accept
+the equivalent `derivatives` mapping. `chainrules.jvp` and `chainrules.vjp`
+support `psi0`, `params`, and `controls`, with `checkpoint_interval` providing a
+bounded-memory reverse sweep. An optional scalar `objective` must provide an
+analytic `jvp`/`derivative` contract (or already be a registered ChainRules
+callable). Missing metadata, non-monotone grids, mixed states, and iterator or
+adaptive paths fail explicitly; no finite-difference fallback is used.
+
 The `upstream/` directory is a byte-for-byte snapshot of the official QuSpin
 repository used for API inventory and tests; it is not imported by the wheel.

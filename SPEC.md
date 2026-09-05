@@ -99,6 +99,30 @@ returns requested `Obs`/`proj` gradients under the real Frobenius inner product.
 `dtype` and orientation are fixed during differentiation.  Central differences
 and JVP/VJP duality are checked to `2e-6`.
 
+## Fixed-grid dynamic trajectories
+
+`quspin_ad.dynamic_trajectory(hamiltonian, psi0, times, ...)` evaluates a
+one-dimensional pure state on a caller-supplied, nondecreasing time grid. A
+QuSpin Hamiltonian's static matrix and dynamic callback terms are supported;
+callback parameters are supplied by name through `params` (or `controls`) and
+each active callback must expose a complete `derivative`/`derivatives` contract.
+For a plain matrix callback, pass a `derivatives` mapping from control names to
+matrix-valued callbacks. The primal uses the same DOP853 fixed-grid output
+path as QuSpin when SciPy is present, with an analytic RK4 augmented-equation
+fallback for sidecar-only environments; no finite-difference sweep is used.
+
+The registered JVP/VJP active names are `psi0`, `params`, and `controls`.
+`objective` may be supplied for a scalar final-state or time-integrated
+objective when it provides an analytic `jvp(states, tangent)` or
+`derivative(states)` contract (or is itself a registered ChainRules callable).
+Unknown controls, missing derivative metadata, non-monotone grids, mixed states,
+and iterator/adaptive solver paths raise explicit errors. With
+`checkpoint_interval=k`, reverse mode retains only every `k`-th output state,
+recomputes each segment, and integrates one continuous adjoint backwards;
+trajectory storage is therefore `O(Ns * ceil(Ntime/k))` checkpoints (plus the
+caller cotangent and returned value), rather than one sensitivity trajectory per
+control. The same callback derivative contract is used on both reverse paths.
+
 ## Deferred or unsuitable API
 
 The remaining inventory entries are intentionally not registered.  Basis
@@ -107,8 +131,10 @@ operator constructors, predicates, save/load and block construction perform
 object creation or I/O; sparse matvec helpers are backend dispatch; entropy and
 measurement routines contain sorting, rank changes, SVD/eigenvalue branches or
 discrete subsystem choices; `mean_level_spacing` sorts and branches at ties;
-`evolve`, Floquet, Lanczos eigensolvers and exponential operators contain
-adaptive solvers/iterators.
+The upstream `evolve` entry remains deferred because it exposes adaptive
+solver/iterator choices; use the bounded `dynamic_trajectory` adapter above for
+fixed-grid control gradients. Floquet, Lanczos eigensolvers and exponential
+operators remain deferred.
 Hamiltonian/quantum-operator methods (`dot`, `expt_value`, `matrix_ele`) are
 object-bound and their parameter dictionaries and dynamic drives require an
 explicit adapter contract not present in QuSpin's public API.  These entries

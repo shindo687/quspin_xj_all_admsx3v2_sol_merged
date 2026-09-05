@@ -18,6 +18,14 @@ from .rules import (
     register_upstream_rules,
 )
 from .rules import ad as _ad
+from .dynamic import (
+    dynamic_trajectory,
+    fixed_grid_trajectory,
+    evolve_fixed_grid,
+    fixed_grid_evolve,
+    trajectory_jvp,
+    trajectory_vjp,
+)
 
 ZERO = _ad.ZERO
 grad = _ad.grad
@@ -39,4 +47,10 @@ __all__ = [
     "register_upstream_rules",
     "value_and_grad",
     "vjp",
+    "dynamic_trajectory",
+    "fixed_grid_trajectory",
+    "evolve_fixed_grid",
+    "fixed_grid_evolve",
+    "trajectory_jvp",
+    "trajectory_vjp",
 ]
