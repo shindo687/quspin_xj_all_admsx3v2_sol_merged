@@ -127,14 +127,21 @@ def _controls_for(entries, params, controls):
 
 
 def _callback_derivatives(callback, fn, names, t, args):
+    def call_contract(contract):
+        if not callable(contract):
+            return contract
+        try:
+            return contract(float(t), *args)
+        except TypeError:
+            try:
+                return contract(float(t), dict(zip(names, args)))
+            except TypeError:
+                return contract(float(t))
+
     contract = getattr(callback, "derivatives", None)
     if contract is None:
         contract = getattr(fn, "derivatives", None)
-    if callable(contract):
-        try:
-            contract = contract(float(t), *args)
-        except TypeError:
-            contract = contract(float(t), dict(zip(names, args)))
+    contract = call_contract(contract)
     single = getattr(callback, "derivative", None)
     if single is None:
         single = getattr(fn, "derivative", None)
@@ -143,7 +150,7 @@ def _callback_derivatives(callback, fn, names, t, args):
             f"dynamic callback {getattr(fn, '__name__', fn)!r} has no derivative contract"
         )
     if contract is None:
-        contract = single(float(t), *args) if callable(single) else single
+        contract = call_contract(single)
     if isinstance(contract, Mapping):
         missing = set(names) - set(contract)
         if missing:
@@ -161,10 +168,7 @@ def _callback_derivatives(callback, fn, names, t, args):
         for name in names:
             value = contract[name]
             if callable(value):
-                try:
-                    value = value(float(t), *args)
-                except TypeError:
-                    value = value(float(t))
+                value = call_contract(value)
             values[name] = value
         return values
     if len(names) == 1 and np.asarray(contract).ndim == 0:
