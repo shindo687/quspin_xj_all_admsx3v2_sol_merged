@@ -39,13 +39,16 @@ For dynamic control, `dynamic_trajectory(H, psi0, times, params=...)` evaluates
 the Schrödinger equation on a caller-provided nondecreasing grid and integrates
 analytic state sensitivities for the named callback coefficients. QuSpin
 Hamiltonian callbacks must expose `derivative` (one coefficient) or
-`derivatives` (a mapping for every coefficient); plain matrix callables accept
-the equivalent `derivatives` mapping. `chainrules.jvp` and `chainrules.vjp`
-support `psi0`, `params`, and `controls`, with `checkpoint_interval` providing a
-bounded-memory reverse sweep. An optional scalar `objective` must provide an
-analytic `jvp`/`derivative` contract (or already be a registered ChainRules
-callable). Missing metadata, non-monotone grids, mixed states, and iterator or
-adaptive paths fail explicitly; no finite-difference fallback is used.
+`derivatives` (a mapping for the differentiated coefficients); plain matrix
+callables accept the equivalent `derivatives` mapping. `chainrules.jvp` and
+`chainrules.vjp` support `psi0`, `params`, and `controls`, with
+`checkpoint_interval` providing a bounded-memory reverse sweep. An optional
+scalar `objective` must provide an analytic `jvp`/`derivative` contract (or
+already be a registered ChainRules callable). Missing metadata, non-monotone
+grids, mixed states, and iterator or adaptive paths fail explicitly; no
+finite-difference fallback is used. Real-valued controls return real
+cotangents, while complex-valued controls preserve their complex real-linear
+cotangents.
 
 The `upstream/` directory is a byte-for-byte snapshot of the official QuSpin
 repository used for API inventory and tests; it is not imported by the wheel.

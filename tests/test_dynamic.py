@@ -196,3 +196,94 @@ def test_dynamic_callback_without_derivative_contract_fails_only_for_sensitivity
             params={"amplitude": 0.7},
             tangents={"params": {"amplitude": 1.0}},
         )
+
+
+def test_dynamic_complex_control_real_linear_vjp_and_checkpoint_duality():
+    sx = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+
+    def matrix_drive(t, params):
+        return params["amplitude"] * np.sin(t) * sx
+
+    def matrix_derivatives(t, params):
+        return {"amplitude": np.sin(t) * sx}
+
+    psi0 = np.array([1.0 + 0.2j, 0.4 - 0.3j])
+    times = np.linspace(0.0, 0.8, 7)
+    params = {"amplitude": 0.7 + 0.2j}
+    dparams = {"amplitude": 0.13 - 0.27j}
+    _, tangent = ad.jvp(
+        quspin_ad.dynamic_trajectory,
+        matrix_drive,
+        psi0,
+        times,
+        params=params,
+        derivatives=matrix_derivatives,
+        tangents={"params": dparams},
+    )
+    cotangent = np.random.default_rng(44).normal(size=(2, times.size))
+    cotangent = cotangent + 1j * np.random.default_rng(45).normal(size=(2, times.size))
+    for checkpoint_interval in (None, 2):
+        _, pullback = ad.vjp(
+            quspin_ad.dynamic_trajectory,
+            matrix_drive,
+            psi0,
+            times,
+            params=params,
+            derivatives=matrix_derivatives,
+            checkpoint_interval=checkpoint_interval,
+            wrt=("params",),
+        )
+        gradient = pullback(cotangent)["params"]["amplitude"]
+        assert np.allclose(
+            np.real(np.vdot(cotangent, tangent)),
+            np.real(np.conj(gradient) * dparams["amplitude"]),
+            rtol=3e-5,
+            atol=3e-6,
+        )
+        assert np.iscomplexobj(gradient)
+
+
+def test_dynamic_partial_control_metadata_and_nested_shape():
+    sx = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    sz = np.diag([1.0, -1.0]).astype(np.complex128)
+
+    def active(t, amplitude):
+        return amplitude * np.sin(t)
+
+    active.derivative = lambda t, amplitude: np.sin(t)
+
+    def inactive(t, offset):
+        return offset * np.cos(t)
+
+    H = hamiltonian(
+        [],
+        [
+            ["x", [[1.0, 0]], active, (0.7,)],
+            ["z", [[1.0, 0]], inactive, (-0.2,)],
+        ],
+        basis=spin_basis_1d(L=1),
+        dtype=np.complex128,
+    )
+    psi0 = np.array([1.0 + 0.0j, 0.0 + 0.0j])
+    times = np.linspace(0.0, 0.5, 5)
+    # Only the active callback is differentiated; missing metadata on the
+    # unrelated callback must not block a valid partial JVP.
+    _, tangent = ad.jvp(
+        quspin_ad.dynamic_trajectory,
+        H,
+        psi0,
+        times,
+        params={"amplitude": 0.7, "offset": -0.2},
+        tangents={"params": {"amplitude": 1.0}},
+    )
+    assert tangent.shape == (2, times.size)
+    _, pullback = ad.vjp(
+        quspin_ad.dynamic_trajectory,
+        H,
+        psi0,
+        times,
+        params={"amplitude": 0.7},
+        wrt=("params",),
+    )
+    gradient = pullback(np.ones_like(tangent))["params"]
+    assert tuple(gradient) == ("amplitude",)

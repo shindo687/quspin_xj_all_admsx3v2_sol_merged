@@ -105,7 +105,10 @@ and JVP/VJP duality are checked to `2e-6`.
 one-dimensional pure state on a caller-supplied, nondecreasing time grid. A
 QuSpin Hamiltonian's static matrix and dynamic callback terms are supported;
 callback parameters are supplied by name through `params` (or `controls`) and
-each active callback must expose a complete `derivative`/`derivatives` contract.
+each differentiated callback coefficient must expose a `derivative`/`derivatives`
+contract.  A partial JVP may activate only a subset of a callback's parameters;
+metadata for unrelated coefficients is not required until those coefficients
+are requested.
 For a plain matrix callback, pass a `derivatives` mapping from control names to
 matrix-valued callbacks. The primal uses the same DOP853 fixed-grid output
 path as QuSpin when SciPy is present, with an analytic RK4 augmented-equation
@@ -122,6 +125,9 @@ recomputes each segment, and integrates one continuous adjoint backwards;
 trajectory storage is therefore `O(Ns * ceil(Ntime/k))` checkpoints (plus the
 caller cotangent and returned value), rather than one sensitivity trajectory per
 control. The same callback derivative contract is used on both reverse paths.
+Cotangents use the real inner product: gradients for real-valued controls are
+real scalars, while complex-valued controls retain their complex real-linear
+cotangent (the conjugate of the complex-linear pairing).
 
 ## Deferred or unsuitable API
 

@@ -56,19 +56,30 @@ def _call_matrix(fn, t, p, positional):
             return fn(float(t), *positional)
     try:
         return fn(float(t), p)
-    except (TypeError, AttributeError):
-        return fn(float(t), *positional)
+    except (TypeError, AttributeError, KeyError, IndexError):
+        try:
+            return fn(float(t), *positional)
+        except (TypeError, AttributeError, KeyError, IndexError):
+            # A positional parameter array is another common generic-callback
+            # convention (``fn(t, params)[0]``).  The first attempt uses the
+            # named mapping so dictionary-style callbacks remain natural.
+            values = np.asarray(positional)
+            return fn(float(t), values[0] if values.size == 1 else values)
 
 
 def _call_derivative(fn, t, pmap, positional):
     """Call a matrix-derivative callback across common parameter styles."""
     try:
         return fn(float(t), pmap)
-    except (TypeError, AttributeError):
+    except (TypeError, AttributeError, KeyError, IndexError):
         try:
             return fn(float(t), *positional)
-        except TypeError:
-            return fn(float(t))
+        except (TypeError, AttributeError, KeyError, IndexError):
+            try:
+                values = np.asarray(positional)
+                return fn(float(t), values[0] if values.size == 1 else values)
+            except (TypeError, AttributeError, KeyError, IndexError):
+                return fn(float(t))
 
 
 def _quspin_entries(H):
@@ -126,17 +137,67 @@ def _controls_for(entries, params, controls):
     return values, tuple(values[name] for name in values)
 
 
-def _callback_derivatives(callback, fn, names, t, args):
+def _supplied_controls(params, controls, pmap):
+    """Return the parameter names represented by the caller's control value.
+
+    QuSpin callbacks carry default positional arguments internally.  Those
+    defaults are needed to evaluate the primal Hamiltonian, but a mapping such
+    as ``params={"amplitude": ...}`` only asks AD to expose that one control in
+    its nested cotangent.  Keeping this distinction avoids returning gradients
+    for values the caller did not supply.
+    """
+    supplied = params if params is not None else controls
+    if isinstance(supplied, Mapping):
+        return tuple(supplied)
+    return tuple(pmap)
+
+
+def _is_zero_tangent(value):
+    """Recognize nested/array zero tangents without invoking callbacks."""
+    if value is ad.ZERO or value is None:
+        return True
+    try:
+        array = np.asarray(value)
+    except Exception:
+        return False
+    return array.size == 0 or bool(np.all(array == 0))
+
+
+def _parameter_cotangent(value, coefficient):
+    """Convert a real-linear coefficient to the primal parameter dtype."""
+    if np.iscomplexobj(np.asarray(value)):
+        # Re(conj(g) dz) is represented by g = conj(coefficient), where
+        # ``coefficient`` is the complex-linear pairing vdot(cotangent, JVP).
+        return np.conj(coefficient)
+    return float(np.real(coefficient))
+
+
+def _callback_derivatives(callback, fn, names, t, args, required_names=None):
+    """Evaluate callback derivative metadata for the requested coefficients.
+
+    A callback may expose derivatives for several coefficients while a JVP
+    activates only a subset.  Requiring metadata for inactive coefficients
+    would make an otherwise valid partial JVP fail, so ``required_names`` is
+    deliberately separate from the callback's complete signature.
+    """
+    required = tuple(names if required_names is None else required_names)
+
     def call_contract(contract):
         if not callable(contract):
             return contract
         try:
             return contract(float(t), *args)
-        except TypeError:
+        except (TypeError, AttributeError, KeyError, IndexError):
             try:
                 return contract(float(t), dict(zip(names, args)))
-            except TypeError:
-                return contract(float(t))
+            except (TypeError, AttributeError, KeyError, IndexError):
+                try:
+                    values = np.asarray(args)
+                    return contract(
+                        float(t), values[0] if values.size == 1 else values
+                    )
+                except (TypeError, AttributeError, KeyError, IndexError):
+                    return contract(float(t))
 
     contract = getattr(callback, "derivatives", None)
     if contract is None:
@@ -152,7 +213,7 @@ def _callback_derivatives(callback, fn, names, t, args):
     if contract is None:
         contract = call_contract(single)
     if isinstance(contract, Mapping):
-        missing = set(names) - set(contract)
+        missing = set(required) - set(contract)
         if missing:
             raise ad.NonDifferentiablePoint(
                 "dynamic callback derivative contract is missing metadata for "
@@ -165,19 +226,19 @@ def _callback_derivatives(callback, fn, names, t, args):
                 f"{sorted(extra)!r}"
             )
         values = {}
-        for name in names:
+        for name in required:
             value = contract[name]
             if callable(value):
                 value = call_contract(value)
             values[name] = value
         return values
-    if len(names) == 1 and np.asarray(contract).ndim == 0:
-        return {names[0]: contract}
+    if len(names) == 1 and len(required) == 1 and np.asarray(contract).ndim == 0:
+        return {required[0]: contract}
     raise TypeError("derivative contract must map every callback parameter")
 
 
 def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
-                    entries=None):
+                    entries=None, sensitivity_names=None):
     if entries is None:
         entries = _quspin_entries(H)
     if entries is not None:
@@ -193,13 +254,11 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
             if Ht.shape != (n, n):
                 raise ValueError("hamiltonian/state dimensions are incompatible")
             Ht = np.asarray(Ht, dtype=np.result_type(Ht, np.complex128)).copy()
-        dm = {name: np.zeros((n, n), dtype=np.complex128) for name in pmap}
+        active = set(pmap if sensitivity_names is None else sensitivity_names)
+        dm = {name: np.zeros((n, n), dtype=np.complex128) for name in active}
         external = derivatives
         if callable(external):
-            try:
-                external = external(float(t), pmap)
-            except TypeError:
-                external = external(float(t), *tuple(pmap.values()))
+            external = _call_derivative(external, t, pmap, ppos)
         if external is not None and not isinstance(external, Mapping):
             raise TypeError(
                 "QuSpin dynamic derivatives must map callback parameter names to scalars or matrices"
@@ -207,10 +266,11 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
         for cb, fn, names, args, mat in entries:
             aa = tuple(pmap.get(name, value) for name, value in zip(names, args))
             Ht = Ht + mat * fn(float(t), *aa)
-            if derivatives is not None or (pmap and require_derivatives):
+            callback_active = tuple(name for name in names if name in active)
+            if callback_active and (derivatives is not None or require_derivatives):
                 if external is not None:
                     vals = {}
-                    for name in names:
+                    for name in callback_active:
                         if name not in external:
                             raise ad.NonDifferentiablePoint(
                                 f"missing derivative metadata for dynamic control {name!r}"
@@ -231,7 +291,9 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
                             )
                         vals[name] = arr.item()
                 else:
-                    vals = _callback_derivatives(cb, fn, names, t, aa)
+                    vals = _callback_derivatives(
+                        cb, fn, names, t, aa, required_names=callback_active
+                    )
                 for name, scalar in vals.items():
                     if name in dm:
                         dm[name] = dm[name] + mat * scalar
@@ -253,6 +315,8 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
         rawd = _call_derivative(derivatives, t, pmap, ppos) if callable(derivatives) else derivatives
         if isinstance(rawd, Mapping):
             for name, val in rawd.items():
+                if sensitivity_names is not None and name not in sensitivity_names:
+                    continue
                 val = _call_derivative(val, t, pmap, ppos) if callable(val) else val
                 arr = np.asarray(val)
                 if arr.shape != (n, n):
@@ -265,6 +329,12 @@ def _ham_and_derivs(H, t, pmap, ppos, derivatives, n, require_derivatives=False,
             if arr.ndim != 3 or arr.shape[1:] != (n, n):
                 raise TypeError("drive derivatives must have shape (nparam,n,n)")
             names = tuple(pmap) or tuple(str(i) for i in range(arr.shape[0]))
+            if sensitivity_names is not None:
+                names = tuple(name for name in names if name in sensitivity_names)
+                # ``arr`` is ordered according to the full parameter list;
+                # select the corresponding rows before zipping below.
+                full_names = tuple(pmap) or tuple(str(i) for i in range(arr.shape[0]))
+                arr = arr[[full_names.index(name) for name in names]] if names else arr[:0]
             if len(names) != arr.shape[0]:
                 raise ValueError("derivative count does not match parameter count")
             dm = dict(zip(names, arr))
@@ -285,7 +355,10 @@ def _parse_call(args, t0, times):
             raise TypeError("expected times or (t0, times)")
     elif args:
         raise TypeError("times supplied more than once")
-    return float(0.0 if t0 is None else t0), _as_grid(times)
+    start = float(0.0 if t0 is None else t0)
+    if not np.isfinite(start):
+        raise ValueError("t0 must be finite and real-valued")
+    return start, _as_grid(times)
 
 
 def _forward(H, psi0, t, params=None, controls=None, derivatives=None, t0=0.0,
@@ -306,7 +379,7 @@ def _forward(H, psi0, t, params=None, controls=None, derivatives=None, t0=0.0,
         yy = y.reshape(count, p.size)
         hm, dm = _ham_and_derivs(
             H, x, pmap, ppos, derivatives, p.size, require_derivatives,
-            entries=entries,
+            entries=entries, sensitivity_names=names,
         )
         out = np.empty_like(yy)
         out[0] = -1j * hm @ yy[0]
@@ -380,7 +453,8 @@ def _rk4_grid(rhs, y0, t0, times, count, n):
 
 
 def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
-                          t0, checkpoint_interval, need_drive):
+                          t0, checkpoint_interval, need_drive,
+                          sensitivity_names=None):
     """Reverse a fixed-grid trajectory while retaining only checkpoints.
 
     The forward state is first evaluated at every ``checkpoint_interval``-th
@@ -395,7 +469,9 @@ def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
         raise ValueError("trajectory cotangent must match output shape")
     entries = _quspin_entries(H)
     pmap, ppos = _controls_for(entries, params, controls)
-    names = tuple(pmap) if need_drive else ()
+    names = tuple(pmap) if sensitivity_names is None and need_drive else (
+        tuple(sensitivity_names) if need_drive else ()
+    )
     # Boundaries are output indices; t0 is kept separately as the beginning of
     # the first segment so grids beginning after t0 are handled correctly.
     boundaries = list(range(0, t.size, checkpoint_interval))
@@ -408,7 +484,11 @@ def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
     )
     n = p.size
     lam = np.zeros(n, dtype=np.result_type(p, g, np.complex128))
-    q = np.zeros(len(names), dtype=float)
+    # Keep the complex coefficient until the final dtype projection.  A
+    # complex control needs the conjugate coefficient under the real-linear
+    # cotangent convention; reducing to ``real`` here loses its imaginary
+    # component and breaks JVP/VJP duality.
+    q = np.zeros(len(names), dtype=np.complex128)
 
     try:
         from scipy.integrate import solve_ivp
@@ -424,7 +504,8 @@ def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
 
         def state_rhs(x, y):
             hm, _ = _ham_and_derivs(
-                H, x, pmap, ppos, derivatives, n, False, entries=entries
+                H, x, pmap, ppos, derivatives, n, False, entries=entries,
+                sensitivity_names=(),
             )
             return -1j * hm @ y
 
@@ -460,7 +541,7 @@ def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
                 lv = z[:n]
                 hm, dm = _ham_and_derivs(
                     H, x, pmap, ppos, derivatives, n, need_drive,
-                    entries=entries,
+                    entries=entries, sensitivity_names=names,
                 )
                 state = np.asarray(state_sol(x))
                 out = np.empty(n + len(names), dtype=np.result_type(z, np.complex128))
@@ -469,10 +550,10 @@ def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
                 out[:n] = -1j * hm.conj().T @ lv
                 for j, name in enumerate(names):
                     # Integrating q' backwards (with a minus sign) yields
-                    # + integral Re(vdot(lambda, B_name psi)) dt.
-                    out[n + j] = -np.real(
-                        np.vdot(lv, -1j * dm.get(name, 0) @ state)
-                    )
+                    # the complex-linear pairing.  The final projection
+                    # conjugates it for a complex primal control and takes
+                    # its real part for a real control.
+                    out[n + j] = -np.vdot(lv, -1j * dm.get(name, 0) @ state)
                 return out
 
             z0 = np.concatenate((lam, q.astype(np.complex128)))
@@ -484,8 +565,11 @@ def _checkpointed_reverse(H, psi0, t, params, controls, derivatives, g,
                 raise RuntimeError(f"checkpoint reverse integration failed: {result.message}")
             lam = result.y[:n, -1]
             if names:
-                q = np.real(result.y[n:, -1])
-    grad_by_name = {name: float(q[j]) for j, name in enumerate(names)}
+                q = result.y[n:, -1]
+    grad_by_name = {
+        name: _parameter_cotangent(pmap[name], q[j])
+        for j, name in enumerate(names)
+    }
     return lam, grad_by_name, pmap
 
 
@@ -495,7 +579,10 @@ def dynamic_trajectory(hamiltonian, psi0, *args, params=None,
     """Return a fixed-grid trajectory, optionally evaluated by ``objective``."""
     _validate_checkpoint(checkpoint_interval)
     t0, t = _parse_call(args, t0, times)
-    states, *_ = _forward(hamiltonian, psi0, t, params, controls, derivatives, t0)
+    states, *_ = _forward(
+        hamiltonian, psi0, t, params, controls, derivatives, t0,
+        sensitivity_names=(),
+    )
     return objective(states) if objective is not None else states
 
 
@@ -597,11 +684,16 @@ def _objective_cotangent(objective, states, cotangent):
 
 def _tangent(H, psi0, t, params, controls, derivatives, tangents, t0=0.0):
     dparams = tangents.get("params", tangents.get("controls", ad.ZERO))
-    need_drive = dparams is not ad.ZERO and dparams is not None and (
-        not isinstance(dparams, Mapping) or bool(dparams)
-    )
+    # Normalize the nested parameter tangent before deciding which callback
+    # derivative contracts are needed.  A zero tangent for one coefficient
+    # must not force metadata for unrelated coefficients.
+    supplied = params if params is not None else controls
+    supplied_names_hint = None
+    if isinstance(supplied, Mapping):
+        supplied_names_hint = tuple(supplied)
     states, sensitivities, pmap = _forward(
-        H, psi0, t, params, controls, derivatives, t0, require_derivatives=need_drive
+        H, psi0, t, params, controls, derivatives, t0,
+        require_derivatives=False, sensitivity_names=(),
     )
     p = np.asarray(psi0)
     dpsi = tangents.get("psi0", ad.ZERO)
@@ -612,13 +704,28 @@ def _tangent(H, psi0, t, params, controls, derivatives, tangents, t0=0.0):
         arr = np.asarray(dparams)
         if arr.ndim == 0:
             arr = arr.reshape(1)
-        if arr.size != len(pmap):
+        target_names = supplied_names_hint if supplied_names_hint is not None else tuple(pmap)
+        if arr.size != len(target_names):
             raise ValueError("parameter tangent must contain one value per active control")
-        dparams = dict(zip(pmap, arr.flat))
+        dparams = dict(zip(target_names, arr.flat))
     else:
         unknown = set(dparams) - set(pmap)
         if unknown:
             raise TypeError(f"unknown dynamic control tangents: {sorted(unknown)!r}")
+    active_names = tuple(name for name, value in dparams.items() if not _is_zero_tangent(value))
+    if supplied_names_hint is not None:
+        # ``params`` is allowed to omit callback defaults.  The pmap still
+        # contains those defaults for primal evaluation, but they cannot be
+        # activated by an omitted nested tangent.
+        omitted = set(dparams) - set(supplied_names_hint)
+        if omitted:
+            raise TypeError(f"dynamic control tangents were not supplied: {sorted(omitted)!r}")
+        active_names = tuple(name for name in active_names if name in supplied_names_hint)
+    if active_names:
+        states, sensitivities, pmap = _forward(
+            H, psi0, t, params, controls, derivatives, t0,
+            require_derivatives=True, sensitivity_names=active_names,
+        )
     out = np.zeros_like(states, dtype=np.result_type(states, dpsi if dpsi is not ad.ZERO else 0))
     if dpsi is not ad.ZERO:
         dpsi = np.asarray(dpsi)
@@ -665,17 +772,30 @@ def _dynamic_vjp(wrt, hamiltonian, psi0, *args, params=None,
     if bad: raise ad.UnsupportedWrt(dynamic_trajectory, bad, supported=allowed)
     t0, t = _parse_call(args, t0, times)
     checkpoint = checkpoint_interval is not None
-    need_drive = any(name in wrt for name in ("params", "controls"))
-    states, sensitivities, pmap = _forward(
-        hamiltonian, psi0, t, params, controls, derivatives, t0,
-        require_derivatives=need_drive,
-        sensitivity_names=() if checkpoint or not need_drive else None,
-    )
-    value = objective(states) if objective is not None else states
-    p = np.asarray(psi0)
     supplied = params if params is not None else controls
     supplied_is_mapping = isinstance(supplied, Mapping)
     supplied_array = None if supplied_is_mapping or supplied is None else np.asarray(supplied)
+    # Resolve the callback/default controls once so nested VJP output mirrors
+    # the caller's parameter structure rather than exposing omitted defaults.
+    _, _, pmap_for_names = _forward(
+        hamiltonian, psi0, t[:1], params, controls, derivatives, t0,
+        require_derivatives=False, sensitivity_names=(),
+    )
+    requested_control_names = _supplied_controls(params, controls, pmap_for_names)
+    unknown_requested = set(requested_control_names) - set(pmap_for_names)
+    if unknown_requested:
+        raise TypeError(f"unknown dynamic controls: {sorted(unknown_requested)!r}")
+    active_drive_names = tuple(requested_control_names) if any(
+        name in wrt for name in ("params", "controls")
+    ) else ()
+    need_drive = bool(active_drive_names)
+    states, sensitivities, pmap = _forward(
+        hamiltonian, psi0, t, params, controls, derivatives, t0,
+        require_derivatives=need_drive,
+        sensitivity_names=() if checkpoint or not need_drive else active_drive_names,
+    )
+    value = objective(states) if objective is not None else states
+    p = np.asarray(psi0)
     def pullback(cotangent):
         if cotangent is ad.ZERO: return dict.fromkeys(wrt, ad.ZERO)
         if objective is not None:
@@ -693,12 +813,18 @@ def _dynamic_vjp(wrt, hamiltonian, psi0, *args, params=None,
             gradp, grad_by_name, _ = _checkpointed_reverse(
                 hamiltonian, psi0, t, params, controls, derivatives, g,
                 t0, checkpoint_interval, need_drive,
+                sensitivity_names=active_drive_names,
             )
         elif not need_drive:
             grad_by_name = {}
             gradp = None
         else:
-            grad_by_name = {k: float(np.real(np.vdot(g, sensitivities[k]))) for k in pmap}
+            grad_by_name = {
+                k: _parameter_cotangent(
+                    pmap[k], np.vdot(g, sensitivities[k])
+                )
+                for k in active_drive_names
+            }
         if gradp is None:
             gradp = np.zeros_like(p, dtype=np.result_type(p, g, np.complex128))
             eye = np.eye(p.size, dtype=np.result_type(p, np.complex128))
@@ -706,7 +832,7 @@ def _dynamic_vjp(wrt, hamiltonian, psi0, *args, params=None,
                 basis, _, _ = _forward(
                     hamiltonian, eye[:, j], t, params, controls, derivatives, t0,
                     require_derivatives=need_drive,
-                    sensitivity_names=() if not need_drive else None,
+                    sensitivity_names=() if not need_drive else active_drive_names,
                 )
                 coefficient = np.vdot(g, basis)
                 # For a complex initial state the map is complex-linear but
@@ -721,18 +847,18 @@ def _dynamic_vjp(wrt, hamiltonian, psi0, *args, params=None,
         if "psi0" in wrt: result["psi0"] = np.real(gradp) if not np.iscomplexobj(p) else gradp
         if "params" in wrt:
             if supplied_array is not None:
-                names = tuple(pmap)
+                names = tuple(active_drive_names)
                 result["params"] = np.asarray([grad_by_name[n] for n in names]).reshape(supplied_array.shape)
             elif supplied_is_mapping:
-                result["params"] = {k: grad_by_name[k] for k in pmap}
+                result["params"] = {k: grad_by_name[k] for k in requested_control_names}
             else:
                 result["params"] = grad_by_name
         if "controls" in wrt:
             if supplied_array is not None:
-                names = tuple(pmap)
+                names = tuple(active_drive_names)
                 result["controls"] = np.asarray([grad_by_name[n] for n in names]).reshape(supplied_array.shape)
             elif supplied_is_mapping:
-                result["controls"] = {k: grad_by_name[k] for k in pmap}
+                result["controls"] = {k: grad_by_name[k] for k in requested_control_names}
             else:
                 result["controls"] = grad_by_name
         return result
